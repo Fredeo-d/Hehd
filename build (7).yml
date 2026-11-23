@@ -1,0 +1,77 @@
+name: Build Frame Windows Mod
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: win64
+            os: windows-latest
+            target: Win64
+          - name: android64
+            os: ubuntu-latest
+            target: Android64
+          - name: android32
+            os: ubuntu-latest
+            target: Android32
+    runs-on: ${{ matrix.os }}
+    name: Build ${{ matrix.name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unpack project zip if present
+        shell: bash
+        run: |
+          shopt -s nullglob
+          zips=( *.zip )
+          if [ ${#zips[@]} -gt 0 ]; then
+            echo "Found project archive: ${zips[0]}"
+            mkdir _proj
+            unzip -o "${zips[0]}" -d _proj > /dev/null
+            shopt -s dotglob
+            if [ $(ls _proj | wc -l) -eq 1 ] && [ -d "$(ls -d _proj/* | head -n 1)" ]; then
+              mv _proj/*/* .
+            else
+              mv _proj/* .
+            fi
+            rm -rf _proj
+          else
+            echo "No zip found, using repository as-is"
+          fi
+          echo "--- Project root ---"
+          ls -la
+
+      - name: Diagnose project
+        shell: bash
+        run: |
+          if [ ! -f mod.json ]; then
+            echo "::error::mod.json not found in project root"
+          else
+            echo "--- mod.json ---"
+            cat mod.json
+          fi
+          if [ ! -f CMakeLists.txt ]; then
+            echo "::error::CMakeLists.txt not found in project root"
+          else
+            echo "--- CMakeLists.txt (first 30 lines) ---"
+            head -n 30 CMakeLists.txt
+          fi
+
+      - name: Build
+        uses: geode-sdk/build-geode-mod@main
+        id: build
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mod-${{ matrix.name }}
+          path: ${{ steps.build.outputs.build-output }}
