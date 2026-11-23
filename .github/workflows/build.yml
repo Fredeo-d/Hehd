@@ -2,101 +2,105 @@ name: Build Frame Windows Mod
 
 on:
   push:
-    branches: [main, master]
   workflow_dispatch:
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: win64
-            os: windows-latest
-          - platform: android64
-            os: ubuntu-latest
-          - platform: android32
-            os: ubuntu-latest
-    runs-on: ${{ matrix.os }}
-
+  build-win:
+    runs-on: windows-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Unzip project if a zip archive was uploaded
-        shell: python
-        run: |
-          import zipfile, glob, os, shutil
-          zips = glob.glob("*.zip")
-          if zips:
-              with zipfile.ZipFile(zips[0]) as z:
-                  z.extractall("_proj")
-              src = "_proj"
-              # если внутри архива одна папка — поднимаем её содержимое на уровень выше
-              entries = os.listdir(src)
-              if len(entries) == 1 and os.path.isdir(os.path.join(src, entries[0])):
-                  src = os.path.join(src, entries[0])
-              for item in os.listdir(src):
-                  shutil.move(os.path.join(src, item), item)
-              shutil.rmtree("_proj", ignore_errors=True)
-          print(sorted(os.listdir(".")))
-
-      - name: Install Geode CLI (Windows)
-        if: runner.os == 'Windows'
+      - name: Unzip project if uploaded as archive
         shell: pwsh
         run: |
-          $rel = Invoke-RestMethod https://api.github.com/repos/geode-sdk/cli/releases/latest
-          $asset = $rel.assets | Where-Object { $_.name -match "win" } | Select-Object -First 1
-          Invoke-WebRequest $asset.browser_download_url -OutFile cli.zip
-          Expand-Archive cli.zip -DestinationPath "$env:RUNNER_TEMP\geodecli" -Force
-          echo "$env:RUNNER_TEMP\geodecli" >> $env:GITHUB_PATH
+          $zip = Get-ChildItem -Path . -Filter *.zip | Select-Object -First 1
+          if ($zip) {
+            Expand-Archive -Path $zip.FullName -DestinationPath .
+            # если распаковался один вложенный каталог - поднимем содержимое
+            $inner = Get-ChildItem -Directory | Where-Object { $_.Name -notin @('.github') }
+            if ($inner.Count -eq 1 -and (Test-Path (Join-Path $inner[0].FullName 'CMakeLists.txt'))) {
+              Copy-Item -Path (Join-Path $inner[0].FullName '*') -Destination . -Force
+            }
+          }
 
-      - name: Install Geode CLI (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
+      - name: Download Geode CLI
+        shell: pwsh
         run: |
-          rel=$(curl -s https://api.github.com/repos/geode-sdk/cli/releases/latest)
-          url=$(echo "$rel" | grep -o '"browser_download_url": *"[^"]*linux[^"]*"' | head -1 | cut -d'"' -f4)
-          curl -L "$url" -o cli.zip
-          mkdir -p "$HOME/geodecli"
-          unzip -o cli.zip -d "$HOME/geodecli"
-          echo "$HOME/geodecli" >> $GITHUB_PATH
-
-      - name: Install Android NDK
-        if: runner.os == 'Linux'
-        id: ndk
-        uses: nttld/setup-ndk@v1
-        with:
-          ndk-version: r27c
-          add-to-path: false
-
-      - name: Configure NDK env
-        if: runner.os == 'Linux'
-        shell: bash
-        run: echo "ANDROID_NDK_ROOT=${{ steps.ndk.outputs.path }}" >> $GITHUB_ENV
+          Invoke-WebRequest -Uri "https://github.com/geode-sdk/cli/releases/latest/download/geode-cli-win.zip" -OutFile geode-cli.zip
+          Expand-Archive -Path geode-cli.zip -DestinationPath geode-cli
+          $cli = (Get-ChildItem -Recurse geode-cli -Filter geode.exe | Select-Object -First 1).FullName
+          Copy-Item $cli -Destination C:\Windows\geode.exe
 
       - name: Install Geode SDK
-        shell: bash
-        run: |
-          geode --version
-          geode sdk install nightly --ready
-          geode sdk setup --skip-cli-update
-
-      - name: Build (win64)
-        if: matrix.platform == 'win64'
         shell: pwsh
-        run: geode build --platform win64
+        run: |
+          geode sdk install nightly --ready
+          geode sdk setup --cli geode --skip-cli-update
 
-      - name: Build (android)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: geode build --platform ${{ matrix.platform }}
+      - name: Build
+        shell: pwsh
+        run: geode build --platform win64 --skip-cli-update
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mod-win64
+          path: build/*.geode
+
+  build-android:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform: [android64, android32]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unzip project if uploaded as archive
+        run: |
+          zipf=$(ls *.zip 2>/dev/null | head -n1 || true)
+          if [ -n "$zipf" ]; then
+            unzip -q "$zipf"
+            inner=$(find . -maxdepth 1 -type d ! -name . ! -name .github | head -n1)
+            if [ -n "$inner" ] && [ -f "$inner/CMakeLists.txt" ]; then
+              cp -a "$inner"/. .
+            fi
+          fi
+          # страховка: убрать виндусовые переводы строк у любых скриптов
+          find . -name '*.sh' -exec sed -i 's/\r$//' {} +
+
+      - name: Download Geode CLI
+        run: |
+          wget -q https://github.com/geode-sdk/cli/releases/latest/download/geode-cli-linux.zip -O geode-cli.zip
+          unzip -q geode-cli.zip -d geode-cli
+          cli=$(find geode-cli -name geode -type f | head -n1)
+          chmod +x "$cli"
+          sudo mv "$cli" /usr/local/bin/geode
+          # убедиться, что бинарник исполняемый и не битый
+          test -x /usr/local/bin/geode
+          /usr/local/bin/geode --version
+
+      - name: Set up JDK and NDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Install NDK r27c
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+          unzip -q android-ndk-r27c-linux.zip -d $HOME/ndk
+          echo "ANDROID_NDK_ROOT=$HOME/ndk/android-ndk-r27c" >> $GITHUB_ENV
+          echo "GEODE_ANDROID_HOME=$HOME/ndk/android-ndk-r27c" >> $GITHUB_ENV
+
+      - name: Install Geode SDK
+        run: |
+          geode sdk install nightly --ready
+          geode sdk setup --cli geode --skip-cli-update
+
+      - name: Build
+        run: geode build --platform ${{ matrix.platform }} --skip-cli-update
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: mod-${{ matrix.platform }}
-          path: |
-            build/*.geode
-            **/*.geode
-          if-no-files-found: error
+          path: build/*.geode
