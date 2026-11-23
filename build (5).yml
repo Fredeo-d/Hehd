@@ -1,0 +1,67 @@
+name: Build Frame Windows Mod
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: Win64
+            os: windows-latest
+          - target: Android64
+            os: ubuntu-latest
+          - target: Android32
+            os: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Unpack project if zipped
+        shell: pwsh
+        run: |
+          $zips = Get-ChildItem -Path . -Filter *.zip | Where-Object { $_.Name -ne 'mod-win64.zip' -and $_.Name -notlike 'mod-android*' }
+          foreach ($z in $zips) {
+            Expand-Archive -Path $z.FullName -DestinationPath ./_unpacked -Force
+            Get-ChildItem -Path ./_unpacked | ForEach-Object {
+              Move-Item -Path $_.FullName -Destination . -Force
+            }
+            Remove-Item -Path ./_unpacked -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Diagnose project
+        shell: pwsh
+        run: |
+          Write-Host "=== Root files ==="
+          Get-ChildItem -Path . | ForEach-Object { Write-Host $_.Name }
+          if (Test-Path ./mod.json) {
+            Write-Host "=== mod.json ==="
+            Get-Content ./mod.json
+          } else {
+            Write-Host "::error::mod.json not found in repository root"
+            exit 1
+          }
+          if (Test-Path ./CMakeLists.txt) {
+            Write-Host "=== CMakeLists.txt (first lines) ==="
+            Get-Content ./CMakeLists.txt -TotalCount 10
+          } else {
+            Write-Host "::error::CMakeLists.txt not found in repository root"
+            exit 1
+          }
+
+      - name: Build mod
+        id: build
+        uses: geode-sdk/build-geode-mod@main
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: mod-${{ matrix.target }}
+          path: ${{ steps.build.outputs['built-output'] }}
